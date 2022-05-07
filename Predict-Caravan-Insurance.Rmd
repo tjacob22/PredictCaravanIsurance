@@ -1,0 +1,493 @@
+---
+title: "CaravanInsurancePolicy"
+author: "Tinju Jacob"
+date: "5/3/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Abstract
+This data set used in the CoIL 2000 Challenge contains information on customers of an insurance company. The problem entails the task of predicting who would be interested in buying a caravan insurance policy and giving an explanation why. This is a classification problem and requires finding factors that differentiates actual customers from non-customers. 
+
+We will try a few classification algorithms and perform model validation using classification error rate from each of these models.
+
+# Description of Data
+
+Dataset contains 85 predictor variables and one response variable. It includes product usage data and socio-demographic data derived from zip area codes. 
+
+## Read data
+
+```{r Description of Data}
+set.seed(123)
+ticdata2000_TRAIN <- read.delim(file ="ticdata2000.txt", header = FALSE) 
+ticeval2000_TEST <- read.delim(file = "ticeval2000.txt", header = FALSE) 
+tictgts2000_TARGETS_TEST <- read.delim(file = "tictgts2000.txt", header = FALSE) # y2
+
+y1    <- ticdata2000_TRAIN$V86;
+
+y2 <- tictgts2000_TARGETS_TEST$V1
+```
+# Exploratory Analysis
+
+```{r libs,message=FALSE,warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(randomForest)
+library(MASS)
+library (gbm)
+library(glmnet)
+library(corrplot)
+library(funModeling)
+library(ROSE)
+library(pROC)
+library(caret)
+library(Boruta)
+```
+Take a look at the summary and structure of the data 
+
+```{r summary, message=FALSE,warning=FALSE, results='hide'}
+glimpse(ticdata2000_TRAIN)
+summary(ticdata2000_TRAIN)
+str(ticdata2000_TRAIN)
+```
+The output of the above chunk is huge, hence hidden in this markdown.
+There are 85 independent variables and a target variable. The target variable in the training data indicated whether that customer has a Caravan insurance or not (1,0)
+Let's take a look at the target variable
+
+```{r barplot6, message = FALSE, ,warning=FALSE}
+
+barplot(table(y1),main = "proportion of target classes",xlab = "Target classes",ylab = "Number of customers", col = c("#ff6666","#66ff66"))
+```
+
+
+
+Clearly there is an imbalance in the target variable. 94% of the datapoints belong to class 0. This is expected as not many people own or insure mobile homes. We will use sampling technique to handle this situation, but before performing any further analysis or feature engineering, I would like to build a base model for benchmarking.
+
+```{r rpart, message = FALSE, ,warning=FALSE}
+library(rpart)
+library(ROSE)
+tree1 <- rpart(V86 ~ ., data = ticdata2000_TRAIN, control=rpart.control(minsplit=5,cp=0))
+pred.tree1 <- predict(tree1, newdata = ticeval2000_TEST)
+y2hat <- ifelse(pred.tree1>0.5,1,0)
+confusionMatrix(table(y2hat,y2),positive = '1')
+accuracy.meas(response = y2, predicted = y2hat)
+
+```
+Our aim is to identify policy holders that will be likely to purchase Caravan insurance. The main cost of false positive is sending additional communication to those who may not be candidates for Caravan insurance. However, the cost of false negative is potentially loss of a customer who is likely to purchase a caravan insurance. Therefore we need to focus on a high recall and/or precision, where in true positive is more important than an overall accuracy even at the cost of some false negatives.
+
+Let us remove duplicates if any and convert categorical variables into factors.
+
+```{r feature_sel, message=FALSE,warning=FALSE}
+#Check for duplicated values
+
+sum(duplicated(ticdata2000_TRAIN))
+training_data <- ticdata2000_TRAIN%>% distinct()
+#now without dupl we have 5220 records
+
+#Check for missing values
+sum(is.na(training_data))
+
+#convert categorical columns into factors
+cols <- c(1,4:64,86)
+
+training_data <- training_data %>% mutate_at(cols, factor)
+str(training_data)
+```
+
+Further exploration
+```{r correlation, message=FALSE,warning=FALSE}
+library(caret)
+data_numeric <- select_if(training_data, is.numeric)
+data_factor <- select_if(training_data, is.factor)
+
+#no corr variables within continuous vars
+correlations <- cor(data_numeric)
+corrplot(correlations, method="number")
+policyCor <-  cor(data_numeric)
+highlyCorPolicy <- findCorrelation(policyCor, cutoff = .75)
+#nothing jumps out
+```
+
+No variable on its own shows high correlation with the target variable. However, it's worth exploring the first few variables listed in the plot above as they show relatively higher correlation with the target variable.
+We will investigate the following variables further
+V47 PPERSAUT Contribution car policies
+V68 APERSAUT Number of car policies
+V59 PBRAND Contribution fire policies
+V61 PPLEZIER Contribution boat policies
+V82 APLEZIER Number of boat policies
+
+We will add V80 - number of fire policies as well as we are investigation contribution to fire policies.
+
+We will see if any of these 6 variables have a strong correlation with the target class 1
+1. V47 PPERSAUT Contribution car policies
+
+```{r feq_independenct_var, message=FALSE, warning=FALSE}
+class1 <- training_data[training_data$V86==1,]
+class0 <- training_data[training_data$V86==0,]
+#freq(class1$V47)
+barplot(table(class1$V47),main = "Customers with Caravan insurance",xlab = "Contribution level to car policies",ylab = "No. of Customers",    col = c("lightblue", "mistyrose", "lightcyan",
+                "lavender", "cornsilk"))
+
+```
+
+2. V68 APERSAUT Number of car policies
+```{r barplot2,message=FALSE, warning=FALSE}
+barplot(table(class1$V68),main = "Customers with Caravan insurance",xlab = "Number of car policies",ylab = "No. of customers", col = c("lightblue", "mistyrose", "lightcyan",
+                "lavender", "cornsilk"))
+
+```
+
+3. V59 PBRAND Contribution fire policies
+```{r barplot3, message=FALSE, warning=FALSE}
+barplot(table(class1$V59),main = "Customers with Caravan insurance",xlab = "Contribution level to fire policies",ylab = "No. of customers", col = c("lightblue", "mistyrose", "lightcyan",
+                "lavender", "cornsilk"))
+```
+4. V61 PPLEZIER Contribution boat policies
+```{r barplot4,message=FALSE, warning=FALSE}
+barplot(table(class1$V80),main = "Customers with Caravan insurance",xlab = "N0. of fire policies",ylab = "No. of customers", col = c("lightblue", "mistyrose", "lightcyan",
+                "lavender", "cornsilk"))
+```
+5. V82 APLEZIER Number of boat policies
+```{r barplot, message=FALSE, warning=FALSE}
+barplot(table(class1$V82),main = "Customers with Caravan insurance",xlab = "No. of boat policies",ylab = "No. of customers", col = c("lightblue", "mistyrose", "lightcyan",
+                "lavender", "cornsilk"))
+```
+6. V80 - number of fire policies
+```{r barplot5, message=FALSE, warning=FALSE}
+barplot(table(class1$V61),main = "Customers with Caravan insurance",xlab = "Contr.level to boat policies",ylab = "No. of customers", col = c("lightblue", "mistyrose", "lightcyan",
+                "lavender", "cornsilk"))
+```
+
+It looks like car insurance, boat insurance and fire insurance have a significant effect on weather a customer is likely to purchase caravan insurance or not.
+
+take a look at the distribution of numerical discrete variables.
+
+```{r plot_num, message=FALSE, warning=FALSE}
+#analyze numerical variables
+library(funModeling)
+plot_num(training_data)
+```
+
+There seems to be multiple predictors with near-zero variance, but none with a single value. I will not remove such variables from the dataset as this is an imbalanced dataset. I may attempt it later after sampling to take care of imbalance.
+
+Convert categorical variables to factors in test dataset
+```{r cat, message=FALSE, warning=FALSE}
+cols <- c(1,4:64)
+
+test_data <- ticeval2000_TEST %>% mutate_at(cols, factor)
+```
+
+Fit rpart again on the transformed data
+
+```{r rpart2, message=FALSE, warning=FALSE}
+library(rpart)
+treeimb <- rpart(V86 ~ ., data = training_data, control=rpart.control(minsplit=5,cp=0))
+#pred.treeimb <- predict(treeimb, newdata = test_data)
+
+```
+
+Since the dataset has an imbalance and there are many categorical variables in our data, test data contains levels that are not present in train data. We will handle this situation by defining same levels for test data as in the case of train data. If test data has a level that is not present in train data, it will be marked NA
+```{r level_correction, message=FALSE, warning=FALSE}
+#Test data contains new levels fora few categorical variables. Therefore manually create levels that are same as that of train data, so the new level in test data will be NA
+for(attr in colnames(training_data))
+{
+  if (is.factor(training_data[[attr]]))
+  {
+    new.levels <- setdiff(levels(test_data[[attr]]), levels(training_data[[attr]]))
+    if ( length(new.levels) > 0 )
+    { print(paste(attr, '- new levels'))
+      print(c(paste(attr, length(new.levels), 'of new levels, e.g.'), head(new.levels, 2)))
+      #levels(test_data[[attr]]) <- union(levels(test_data[[attr]]), levels(training_data[[attr]]))
+      test_data[[attr]] <- factor(test_data[[attr]], levels = levels(training_data[[attr]]))
+    }
+  }
+}
+
+#Remove rows with NA's in test data
+NAs = which(is.na(test_data),arr.ind=TRUE)[,1]
+test_data_cleaned = test_data[-NAs,]
+y2_cleaned <- y2[-NAs]
+```
+
+We have fixed the problem of level mismatch in test and train data.
+We can now look at a base rpart model to see how imbalance in data can affect our model
+```{r rpat-cont, message=FALSE, warning=FALSE}
+pred.treeimb <- predict(treeimb, newdata = test_data_cleaned)
+
+y2hat <- ifelse(pred.treeimb[,2]>0.5,1,0)
+table(y2hat,y2_cleaned)
+accuracy.meas(response = y2hat,predicted = y2_cleaned)
+confusionMatrix(table(y2hat,y2_cleaned), positive="1")
+
+```
+Our model accuracy has slightly improved after performing certain data transformation such as converting categorical values into factors.The specificity is high as well which means most of the negatives have been correctly classified as negatives.
+The sensitivity is low at .13 - many positives have been classified as false negatives. We need out mode product more true positives. Also, there still exists the issue of imbalance. 
+
+
+# Data sampling
+
+As noticed before, we have high imbalance in the data. About 94% of the data points are of class 0 and only about 6% is of class 1. In order to handle this situation we will use a combination of undersampling and oversampling AND Synthetic generation to distribute the data equally. Undersampling will remove some data points from the majority class and oversampling will duplicate some datapoints from the minority class.
+
+
+```{r SAMPLING, message=FALSE, warning=FALSE}
+train_data_balanced <- ovun.sample(V86 ~ ., data = training_data, method = "over",N=2*sum(training_data$V86==0), seed = 1)$data
+#train_data_balanced <- ovun.sample(V86 ~ ., data = training_data, method = "under",N=2*(sum(training_data$V86==1)), seed = 1)$data
+table(train_data_balanced$V86)
+```
+
+We have a balanced training set now. Let us fit rpart on this training set to find out if this improves the performance.
+
+```{r rpart2-cont, message=FALSE, warning=FALSE}
+tree.balanced <- rpart(V86 ~ ., data = train_data_balanced)
+#check accuracy of predictions
+pred.tree.balanced <- predict(tree.balanced, newdata = test_data_cleaned)
+#select optimal threshold from model fit. 
+#Remember we need as many true positives as possible without compromising much on the Accuracy and/or #specificity.
+rpart.fit <- predict(tree.balanced, type="prob")
+roc_curve=roc(train_data_balanced$V86, rpart.fit[,2])
+my.coords <- coords(roc=roc_curve, x = "all", transpose = FALSE)
+prob_threshold = my.coords[(my.coords$sensitivity >= .5)& (my.coords$specificity >=.7), ][1,1]
+
+pred.tree.class <- ifelse(pred.tree.balanced[,2]>prob_threshold,1,0)
+accuracy.meas(response = y2_cleaned, predicted = pred.tree.class)
+confusionMatrix(table(pred.tree.class,y2_cleaned),positive = '1')
+selected_variables <-c(rownames(varImp(tree.balanced))[1:31],"V86")
+train_selected <- train_data_balanced[,selected_variables]
+```
+With the transformed input data, the model sensitivity has drastically improved even though the specificity has reduced to some extent. We will use the new training data to try a few other classification models and cross validations to improve the prediction. 
+
+# Various classification models
+## 1. KNN 
+
+```{r KNN, message=FALSE, warning=FALSE}
+knn_model <- train(
+  V86 ~., data = train_data_balanced, method = "knn",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+# Plot model accuracy vs different values of k
+plot(knn_model)
+
+# Print the best tuning parameter k that
+# maximizes model accuracy
+knn_model$bestTune
+#check accuracy of predictions
+pred.knn <- predict(knn_model, newdata = test_data_cleaned, type = "prob")
+#threshold
+knn.fit <- predict(knn_model, type="prob")
+roc_curve=roc(train_data_balanced$V86, knn.fit[,2])
+my.coords <- coords(roc=roc_curve, x = "all", transpose = FALSE)
+prob_threshold = my.coords[(my.coords$sensitivity >= .5)& (my.coords$specificity >=.7), ][1,1]
+
+pred.knn.class <- ifelse(pred.knn[,2]>prob_threshold,1,0)
+confusionMatrix(table(pred.knn.class,y2_cleaned),positive='1')
+accuracy.meas(response = y2_cleaned, predicted = pred.knn.class)
+```
+
+
+## 2. logistic regression 
+
+
+```{r GLM, message=FALSE, warning=FALSE}
+
+
+glm_model <- glm(V86 ~.,family=binomial(link='logit'),data=train_data_balanced)
+#summary(glm_model)====
+glm_probabilities <- predict(glm_model, test_data_cleaned, type = "response")
+#prob threshold
+glm.fit <- predict(glm_model, type="response")
+roc_curve=roc(train_data_balanced$V86, glm.fit)
+my.coords <- coords(roc=roc_curve, x = "all", transpose = FALSE)
+prob_threshold = my.coords[(my.coords$sensitivity >= .5)& (my.coords$specificity >=.7), ][1,1]
+
+glm_class <- ifelse(glm_probabilities > prob_threshold, 1, 0)
+confusionMatrix(table(glm_class,y2_cleaned),positive = '1')
+accuracy.meas(response = y2_cleaned, predicted = glm_class)
+```
+
+### 2b. logistic regression with factor selection
+Earlier in the data exploration phase, we saw that details around car insurance, boat insurance and fire insurance may have notable effect on the target class. We will now perform glm with these variables.
+
+```{r GLM2, message=FALSE, warning=FALSE}
+
+
+glm_model2 <- glm(V86 ~ V47+V68+V59+V61+V82+V80,family=binomial(link='logit'),data=train_data_balanced)
+#summary(glm_model)====
+glm_probabilities2 <- predict(glm_model2, test_data_cleaned, type = "response")
+#prob threshold
+glm.fit2 <- predict(glm_model2, type="response")
+roc_curve=roc(train_data_balanced$V86, glm.fit2)
+my.coords <- coords(roc=roc_curve, x = "all", transpose = FALSE)
+prob_threshold = my.coords[(my.coords$sensitivity >= .55)& (my.coords$specificity >=.7), ][1,1]
+
+glm_class2 <- ifelse(glm_probabilities2 > prob_threshold, 1, 0)
+confusionMatrix(table(glm_class2,y2_cleaned),positive = '1')
+accuracy.meas(response = y2_cleaned, predicted = glm_class2)
+
+```
+
+
+## 4a. Naive Bayes with select variables
+
+```{r Naive-varsel, message=FALSE, warning=FALSE}
+library(e1071)
+library(naivebayes)
+test_data_cleaned <- rbind(train_data_balanced[1,-86 ],test_data_cleaned)
+test_data_cleaned <- test_data_cleaned[-1,]
+#Use Variableimportance from rpart for variable selection.
+naive_model <- naive_bayes(V86 ~ V47+V59+V61+V68+V80+V82, data = train_data_balanced, usekernel = T)  
+naive_prob <- predict(naive_model, test_data_cleaned,type = "prob")
+
+#Threshold
+naive.fit <- predict(naive_model, type="prob")
+roc_curve=roc(train_data_balanced$V86, naive.fit[,2])
+my.coords <- coords(roc=roc_curve, x = "all", transpose = FALSE)
+prob_threshold = my.coords[(my.coords$sensitivity >= .5)& (my.coords$specificity >=.7), ][1,1]
+
+naive_class <- ifelse(naive_prob[,2] > prob_threshold,1,0)
+confusionMatrix(table(naive_class,y2_cleaned),positive = '1')
+accuracy.meas(response = y2_cleaned, predicted = naive_class)
+
+```
+
+
+## 4b. Naive Bayes with all variables
+
+```{r Naive-allvar, message=FALSE, warning=FALSE}
+
+naive_model_all <- naive_bayes(V86 ~ ., data = train_data_balanced, usekernel = T)  
+naive_prob_all <- predict(naive_model_all, test_data_cleaned,type = "prob")
+
+#Threshold
+naive.fit_all <- predict(naive_model_all, type="prob")
+my.coords <- coords(roc=roc_curve, x = "all", transpose = FALSE)
+prob_threshold = my.coords[(my.coords$sensitivity >= .5)& (my.coords$specificity >=.7), ][1,1]
+
+naive_class_all <- ifelse(naive_prob_all[,2] > prob_threshold,1,0)
+confusionMatrix(table(naive_class_all,y2_cleaned),positive = '1')
+accuracy.meas(response = y2_cleaned, predicted = naive_class_all)
+
+```
+
+```{r pred800, include=FALSE}
+naive_prob_800 <- predict(naive_model, test_data_cleaned,type = "prob")[,2]
+naive_800_class <- rep(0,length(naive_prob_800))
+naive_800_class[order(naive_prob_800,decreasing = TRUE)[1:800]] <- 1
+confusionMatrix(table(naive_800_class,y2_cleaned),positive = '1')
+accuracy.meas(response = y2_cleaned, predicted = naive_800_class)
+```
+
+
+## 5. GBM
+
+```{r gbm, message=FALSE, warning=FALSE}
+training_data_gbm = train_data_balanced
+training_data_gbm$V86 <- as.numeric(training_data_gbm$V86, start.at=0)-1
+gbm2.train <- gbm(V86 ~ .,data=training_data_gbm,
+                       distribution = 'bernoulli',
+                       n.trees =5000, 
+                       shrinkage = 0.01, 
+                       interaction.depth = 3,
+                        cv.folds = 10,
+                        class.stratify.cv = TRUE)
+
+## Model Inspection 
+#3esummary(gbm2.train)
+## Find the estimated optimal number of iterations
+perf_gbm2 = gbm.perf(gbm2.train, method="cv") 
+cat("The estimated optimal number of iterations is", perf_gbm2)
+#Prob threshold
+gbm.fit <- predict(gbm2.train,n.trees=perf_gbm2, type="response")
+roc_curve=roc(train_data_balanced$V86, gbm.fit)
+my.coords <- coords(roc=roc_curve, x = "all", transpose = FALSE)
+prob_threshold = my.coords[(my.coords$sensitivity >= .5)& (my.coords$specificity >=.7), ][1,1]
+
+#Test error
+gbm_prob <- predict(gbm2.train,newdata = test_data_cleaned, n.trees=perf_gbm2, type="response")
+gbm_class <- ifelse(gbm_prob > prob_threshold, 1, 0)
+confusionMatrix(table(gbm_class,y2_cleaned),positive = '1')
+accuracy.meas(response = y2_cleaned, predicted = gbm_class)
+```
+
+
+## 3. Random Forest
+```{r RF, message=FALSE, warning=FALSE}
+RF_model <- randomForest(V86 ~., data=train_data_balanced, importance=TRUE, ntree=1000)
+importance(RF_model)
+#RFimp = data.frame(importance(RF_model))
+#RFimp[order(-RFimp$MeanDecreaseGini),]
+
+RF_prob = predict(RF_model, test_data_cleaned,type = "prob")
+#Threshold
+RF.fit <- predict(RF_model, type="prob")
+roc_curve=roc(train_data_balanced$V86, RF.fit[,2])
+my.coords <- coords(roc=roc_curve, x = "all", transpose = FALSE)
+prob_threshold = my.coords[(my.coords$sensitivity >= .5)& (my.coords$specificity >=.75), ][1,1]
+
+RF_class = ifelse(RF_prob[,2]>prob_threshold,1,0)
+RF_class = predict(RF_model, test_data_cleaned,type = "class")
+confusionMatrix(table(RF_class,y2_cleaned),positive = '1')
+accuracy.meas(response = y2_cleaned, predicted = RF_class)
+```
+The sensitivity has improved with no much reduction in accuracy.
+
+## Naive with variables with high importance from Random forest
+Looking at the variable importance plot based on mean decrease in Gini index, some of the variables we previously used in Naive Bayes appear on top of the plot, but V1 (Customer subtype) is the first in this list. We will fit Naive Bayes once more with the variables listed with high importance in this plot.
+
+```{r Naive-VarImp, message=FALSE, warning=FALSE}
+
+naive_model_imp <- naive_bayes(V86 ~ V1+V47+V59+V68, data = train_data_balanced, usekernel = T)  
+naive_prob_imp <- predict(naive_model_imp, test_data_cleaned,type = "prob")
+
+#Threshold
+naive.fit_imp <- predict(naive_model_imp, type="prob")
+my.coords <- coords(roc=roc_curve, x = "all", transpose = FALSE)
+prob_threshold = my.coords[(my.coords$sensitivity >= .5)& (my.coords$specificity >=.7), ][1,1]
+
+naive_class_imp <- ifelse(naive_prob_imp[,2] > prob_threshold,1,0)
+confusionMatrix(table(naive_class_imp,y2_cleaned),positive = '1')
+accuracy.meas(response = y2_cleaned, predicted = naive_class_imp)
+
+```
+
+
+## Partial dependency plots
+
+Based on our analysis so far variables related to car policies, boat policies and fire policies are the variables with good predictive power. We will create partial dependency plot of these variables based on Random forest model to see the importance of these variables on classifying a data point as potential customer for Caravan insurance.
+```{r partial dependency plots}
+par(mfrow=c(3,2))
+partialPlot(RF_model, pred.data = train_data_balanced, x.var = "V47",which.class = 1, xlab="Contr.to car policies", main="Partial depepdence on Contribution to car poilicies")
+partialPlot(RF_model, pred.data = train_data_balanced, x.var = "V59",which.class = 1, xlab="Contr.to fire policies", main="Partial depepdence on Contribution to fire poilicies")
+partialPlot(RF_model, pred.data = train_data_balanced, x.var = "V61",which.class = 1, xlab="Contr.to boat policies", main="Partial depepdence on Contribution to boat poilicies")
+partialPlot(RF_model, pred.data = train_data_balanced, x.var = "V68",which.class = 1, xlab="No. of car policies", main="Partial depepdence on No. car poilicies")
+partialPlot(RF_model, pred.data = train_data_balanced, x.var = "V80",which.class = 1, xlab="No. of fire policies", main="Partial depepdence on No. of fire poilicies")
+partialPlot(RF_model, pred.data = train_data_balanced, x.var = "V82",which.class = 1, xlab="No. of boat policies", main="Partial depepdence on No. of boat poilicies")
+```
+
+
+This shows that customers who have a contribution level of 6($1000 - $4999) to car policies are more likely than others to purchase a Caravan insurance. Also, Customers who have a fire policy with a contribution of $200-499 have a positive influence on the likelihood of purchasing a caravan insurance. Boat policies may not have much importance in prediction as 99% of the entire list of customers fall in the 0 category
+
+#Model Evaluation
+We chose to assign a cost to misclassification and use it as success criteria in addition to specificity and sensitivity. The cost of misclassification was calculated with the formula: 
+cost of class j = no. of data points/ (no. of classes * no. of data points in class j)
+
+cost assigned to FN = 1 and FP = 7
+
+#Results
+
+Our modeling exercise started with a simple decision tree before performing any sampling to balance the dataset. This model saw a high accuracy of about .92 and specificity of 0.96. However, it had a very low sensitivity of 0.1 as most of the data were classified as 0's. This does 
+not serve our purpose of identifying potential customers. We fit this rpart model again on the oversampled training data and evaluated the performance 
+again. This time, the accuracy went down to 0.67, but the specificity of the rate of true positive was significantly higher at 0.65. 
+KNN, Random Forest and Gradient Boosting gave encouraging results.We fit Logistic Regression and Naive Bayes models with the selected variables alone and saw 
+better predictive performance compared to the full model. Naïve Bayes was performed with variables selected through rpart(1) as well random forest(2).
+Naïve Bayes and Logistic Regression with variable selection performed the best. These models were not very computationally intensive and predicted close to 120 customers as true positives.
+
+Naïve Bayes and Logistic Regression with variable selection performed the best. These models were not very computationally intensive and predicted close to 120 customers as true positives.
+
+![Comparison of model accuracy.](comparisonexcel.png)
+
+
